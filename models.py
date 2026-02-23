@@ -18,13 +18,17 @@ class VehicleSearchRequest(BaseModel):
     make: str = Field(..., description="Vehicle make (e.g. Ford, BMW, Toyota)", min_length=1)
     model: str = Field(..., description="Vehicle model (e.g. Focus, 3 Series, Corolla)", min_length=1)
     year: Optional[int] = Field(None, description="Year of manufacture (e.g. 2020)", ge=1900, le=2030)
+    fuel_type: Optional[str] = Field(None, description="Fuel type (e.g. Petrol, Diesel, Electric, Hybrid). If omitted, will be inferred from gov data when available.")
+    model_variant: Optional[str] = Field(None, description="Specific model variant or engine (e.g. '1.0T EcoBoost', 'ST-3', '320d', '1117 HC'). Helps distinguish different engines and trim levels that affect weight and dimensions.")
     
     class Config:
         json_schema_extra = {
             "example": {
                 "make": "Ford",
                 "model": "Focus",
-                "year": 2020
+                "year": 2020,
+                "fuel_type": "Petrol",
+                "model_variant": "1.0T EcoBoost"
             }
         }
 
@@ -38,11 +42,13 @@ class GovDataFields(BaseModel):
     """Fields available from UK gov licensing CSV data"""
     body_type: Optional[str] = Field(None, description="Vehicle body type (Cars, Motorcycles, etc.)")
     generic_model: Optional[str] = Field(None, description="Generic model grouping from gov data")
+    matched_variant: Optional[str] = Field(None, description="The specific model variant matched in gov data (e.g. 'FIESTA 1.0T ECOBOOST')")
     fuel_type: Optional[str] = Field(None, description="Fuel type (Petrol, Diesel, Electric, Hybrid, etc.)")
     engine_size_cc: Optional[int] = Field(None, description="Engine size in cc")
     engine_size_band: Optional[str] = Field(None, description="Engine size band (e.g. '1301cc to 1400cc')")
     total_registered: Optional[int] = Field(None, description="Total registered vehicles of this make/model")
     first_registered_year: Optional[int] = Field(None, description="Year first registered in UK")
+    available_variants: Optional[List[str]] = Field(None, description="Known model variants from gov data for this make/model (e.g. ['FIESTA 1.0T', 'FIESTA ST-3', 'FIESTA 1117 HC'])")
 
 
 class VehicleInfoResponse(BaseModel):
@@ -51,6 +57,7 @@ class VehicleInfoResponse(BaseModel):
     search_make: str
     search_model: str
     search_year: Optional[int] = None
+    search_variant: Optional[str] = None
     
     # Dimensions from Bing Grounding search
     length_mm: Optional[int] = Field(None, description="Vehicle length in millimetres")

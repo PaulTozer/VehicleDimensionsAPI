@@ -59,6 +59,7 @@ class VehicleLookupService:
             search_make=request.make,
             search_model=request.model,
             search_year=request.year,
+            search_variant=request.model_variant,
             last_checked=datetime.utcnow(),
         )
         
@@ -66,28 +67,52 @@ class VehicleLookupService:
             # Step 1: Gov data lookup (fast, local)
             if self.gov_service and self.gov_service.is_loaded:
                 gov_result = self.gov_service.lookup(
-                    request.make, request.model, request.year
+                    request.make, request.model, request.year,
+                    model_variant=request.model_variant,
                 )
                 if gov_result:
                     response.gov_data = GovDataFields(
                         body_type=gov_result.get("body_type"),
                         generic_model=gov_result.get("generic_model"),
+                        matched_variant=gov_result.get("matched_variant"),
                         fuel_type=gov_result.get("fuel_type"),
                         engine_size_cc=gov_result.get("engine_size_cc"),
                         engine_size_band=gov_result.get("engine_size_band"),
                         total_registered=gov_result.get("total_registered"),
                         first_registered_year=gov_result.get("first_registered_year"),
+                        available_variants=gov_result.get("available_variants"),
                     )
                     logger.info(f"Gov data found for: {request.make} {request.model}")
             
             # Step 2: Bing Grounding agent search for dimensions & weight
+            # Use fuel type from request, or fall back to gov data if available
+            search_fuel_type = request.fuel_type
+            if not search_fuel_type and response.gov_data and response.gov_data.fuel_type:
+                # Gov data may list multiple fuel types (e.g. "DIESEL, PETROL").
+                # If there's only one, use it directly; otherwise leave it for
+                # the user to specify or pass the full list so Bing can pick.
+                gov_fuels = response.gov_data.fuel_type
+                if "," not in gov_fuels:
+                    search_fuel_type = gov_fuels
+            
+            # Use model_variant from request, or fall back to matched variant from gov
+            search_variant = request.model_variant
+            if not search_variant and response.gov_data and response.gov_data.matched_variant:
+                # Gov matched a specific variant — use it for more precise Bing search
+                search_variant = response.gov_data.matched_variant
+            
             bing_result = None
             if self.bing_service and self.bing_service.is_configured:
-                logger.info(f"Using Bing Grounding agent for: {request.make} {request.model}")
+                logger.info(
+                    f"Using Bing Grounding agent for: {request.make} {request.model} "
+                    f"(variant: {search_variant or 'any'}, fuel: {search_fuel_type or 'any'})"
+                )
                 bing_result = await self.bing_service.search_vehicle_async(
                     make=request.make,
                     model=request.model,
                     year=request.year,
+                    fuel_type=search_fuel_type,
+                    model_variant=search_variant,
                 )
                 
                 if bing_result:
@@ -192,6 +217,10 @@ class VehicleLookupService:
         parts = [request.make.lower(), request.model.lower()]
         if request.year:
             parts.append(str(request.year))
+        if request.fuel_type:
+            parts.append(request.fuel_type.lower())
+        if request.model_variant:
+            parts.append(request.model_variant.lower())
         return ":".join(parts)
     
     def _response_to_dict(self, response: VehicleInfoResponse) -> dict:
@@ -200,6 +229,7 @@ class VehicleLookupService:
             "search_make": response.search_make,
             "search_model": response.search_model,
             "search_year": response.search_year,
+            "search_variant": response.search_variant,
             "length_mm": response.length_mm,
             "width_mm": response.width_mm,
             "width_with_mirrors_mm": response.width_with_mirrors_mm,
@@ -218,11 +248,13 @@ class VehicleLookupService:
             d["gov_data"] = {
                 "body_type": response.gov_data.body_type,
                 "generic_model": response.gov_data.generic_model,
+                "matched_variant": response.gov_data.matched_variant,
                 "fuel_type": response.gov_data.fuel_type,
                 "engine_size_cc": response.gov_data.engine_size_cc,
                 "engine_size_band": response.gov_data.engine_size_band,
                 "total_registered": response.gov_data.total_registered,
                 "first_registered_year": response.gov_data.first_registered_year,
+                "available_variants": response.gov_data.available_variants,
             }
         return d
     
@@ -234,17 +266,20 @@ class VehicleLookupService:
             gov_data = GovDataFields(
                 body_type=gd.get("body_type"),
                 generic_model=gd.get("generic_model"),
+                matched_variant=gd.get("matched_variant"),
                 fuel_type=gd.get("fuel_type"),
                 engine_size_cc=gd.get("engine_size_cc"),
                 engine_size_band=gd.get("engine_size_band"),
                 total_registered=gd.get("total_registered"),
                 first_registered_year=gd.get("first_registered_year"),
+                available_variants=gd.get("available_variants"),
             )
         
         return VehicleInfoResponse(
             search_make=data.get("search_make", request.make),
             search_model=data.get("search_model", request.model),
             search_year=data.get("search_year", request.year),
+            search_variant=data.get("search_variant"),
             length_mm=data.get("length_mm"),
             width_mm=data.get("width_mm"),
             width_with_mirrors_mm=data.get("width_with_mirrors_mm"),

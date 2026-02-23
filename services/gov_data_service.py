@@ -12,6 +12,7 @@ import csv
 import io
 import logging
 import os
+import re
 import time
 from collections import defaultdict
 from typing import Optional, Dict, Any, List, Tuple
@@ -22,11 +23,17 @@ from config import GOV_DATA_DIR, GOV_DATA_AUTO_DOWNLOAD
 
 logger = logging.getLogger(__name__)
 
-# Gov.uk download URLs for the CSV data files
-GOV_CSV_URLS = {
-    "veh0124_am": "https://assets.publishing.service.gov.uk/media/67a170e5ad1e4b41e585b1e7/df_VEH0124_AM.csv",
-    "veh0124_nz": "https://assets.publishing.service.gov.uk/media/67a170f9e2fb9614db027f7a/df_VEH0124_NZ.csv",
-    "veh0220": "https://assets.publishing.service.gov.uk/media/67a17155e2fb9614db027f7d/df_VEH0220.csv",
+# The gov.uk page that lists all CSV download links (link IDs change on each data refresh)
+GOV_DATA_PAGE_URL = (
+    "https://www.gov.uk/government/statistical-data-sets/"
+    "vehicle-licensing-statistics-data-files"
+)
+
+# Fallback URLs — used only if the page scrape fails
+_FALLBACK_CSV_URLS = {
+    "veh0124_am": "https://assets.publishing.service.gov.uk/media/68ed0befa8398380cb4acfdb/df_VEH0124_AM.csv",
+    "veh0124_nz": "https://assets.publishing.service.gov.uk/media/68ed0bbc82670806f9d5dfe2/df_VEH0124_NZ.csv",
+    "veh0220": "https://assets.publishing.service.gov.uk/media/68ed09a42adc28a81b4acfec/df_VEH0220.csv",
 }
 
 # Local file names
@@ -35,6 +42,56 @@ GOV_CSV_FILES = {
     "veh0124_nz": "df_VEH0124_NZ.csv",
     "veh0220": "df_VEH0220.csv",
 }
+
+# Regex patterns to extract download URLs from the gov.uk page HTML
+# Each pattern matches the assets.publishing URL for the corresponding CSV file
+_CSV_URL_PATTERNS: Dict[str, re.Pattern] = {
+    "veh0124_am": re.compile(
+        r'https://assets\.publishing\.service\.gov\.uk/media/[a-f0-9]+/df_VEH0124_AM\.csv',
+        re.IGNORECASE,
+    ),
+    "veh0124_nz": re.compile(
+        r'https://assets\.publishing\.service\.gov\.uk/media/[a-f0-9]+/df_VEH0124_NZ\.csv',
+        re.IGNORECASE,
+    ),
+    "veh0220": re.compile(
+        r'https://assets\.publishing\.service\.gov\.uk/media/[a-f0-9]+/df_VEH0220\.csv',
+        re.IGNORECASE,
+    ),
+}
+
+
+async def _discover_csv_urls() -> Dict[str, str]:
+    """
+    Scrape the gov.uk data-files page to find the current CSV download URLs.
+
+    Returns a dict mapping file keys (e.g. "veh0124_am") to their download URLs.
+    Falls back to hardcoded URLs if the page cannot be fetched or parsed.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(GOV_DATA_PAGE_URL)
+            response.raise_for_status()
+            html = response.text
+
+        urls: Dict[str, str] = {}
+        for key, pattern in _CSV_URL_PATTERNS.items():
+            match = pattern.search(html)
+            if match:
+                urls[key] = match.group(0)
+                logger.info(f"  Discovered {GOV_CSV_FILES[key]} URL: {urls[key]}")
+            else:
+                logger.warning(f"  Could not find {GOV_CSV_FILES[key]} link on gov.uk page")
+
+        if urls:
+            return urls
+
+        logger.warning("No CSV URLs discovered from gov.uk page — using fallback URLs")
+        return dict(_FALLBACK_CSV_URLS)
+
+    except Exception as e:
+        logger.warning(f"Failed to scrape gov.uk data page: {e} — using fallback URLs")
+        return dict(_FALLBACK_CSV_URLS)
 
 
 class GovDataService:
@@ -134,15 +191,32 @@ class GovDataService:
         return loaded_any
     
     async def _download_missing_files(self):
-        """Download any missing CSV files from gov.uk"""
+        """Download any missing CSV files from gov.uk, discovering current URLs dynamically."""
+        # Check which files are missing before doing any network calls
+        missing_keys = []
+        for key in GOV_CSV_FILES:
+            filepath = os.path.join(self.data_dir, GOV_CSV_FILES[key])
+            if os.path.exists(filepath):
+                size_mb = os.path.getsize(filepath) / (1024 * 1024)
+                logger.info(f"  {GOV_CSV_FILES[key]} exists ({size_mb:.1f} MB), skipping download")
+            else:
+                missing_keys.append(key)
+
+        if not missing_keys:
+            return
+
+        # Discover current download URLs from the gov.uk page
+        logger.info("Discovering current CSV download URLs from gov.uk...")
+        csv_urls = await _discover_csv_urls()
+
         async with httpx.AsyncClient(timeout=120.0, follow_redirects=True) as client:
-            for key, url in GOV_CSV_URLS.items():
-                filepath = os.path.join(self.data_dir, GOV_CSV_FILES[key])
-                if os.path.exists(filepath):
-                    size_mb = os.path.getsize(filepath) / (1024 * 1024)
-                    logger.info(f"  {GOV_CSV_FILES[key]} exists ({size_mb:.1f} MB), skipping download")
+            for key in missing_keys:
+                url = csv_urls.get(key)
+                if not url:
+                    logger.warning(f"  No URL available for {GOV_CSV_FILES[key]}, skipping")
                     continue
-                
+
+                filepath = os.path.join(self.data_dir, GOV_CSV_FILES[key])
                 logger.info(f"  Downloading {GOV_CSV_FILES[key]} from gov.uk...")
                 try:
                     response = await client.get(url)
@@ -162,6 +236,9 @@ class GovDataService:
         
         Expected columns: BodyType, Make, GenModel, Model, YearFirstUsed, YearManufacture, <year columns>
         Each year column contains vehicle counts.
+        
+        The index stores both overall totals and per-manufacture-year breakdowns
+        so lookups can be filtered by year.
         """
         rows_loaded = 0
         try:
@@ -194,21 +271,38 @@ class GovDataService:
                             "body_type": body_type,
                             "years_manufactured": set(),
                             "total_count": 0,
+                            "by_year": {},  # year -> {body_type, count}
                         }
                     
                     entry = self._veh0124_index[key]
                     
-                    # Track manufacture years
-                    if year_mfr and year_mfr.isdigit():
-                        entry["years_manufactured"].add(int(year_mfr))
+                    # Parse the manufacture year
+                    mfr_year = int(year_mfr) if year_mfr and year_mfr.isdigit() else None
+                    if mfr_year:
+                        entry["years_manufactured"].add(mfr_year)
                     
-                    # Sum up the count columns (right-most columns are yearly counts)
+                    # Sum the count columns (yearly snapshot counts)
+                    row_count = 0
                     for col_name, value in row.items():
                         if col_name.startswith("20") and value and value not in ("[c]", "[x]", "[z]"):
                             try:
-                                entry["total_count"] += int(value)
+                                row_count += int(value)
                             except ValueError:
                                 pass
+                    
+                    entry["total_count"] += row_count
+                    
+                    # Store per-manufacture-year breakdown
+                    if mfr_year:
+                        if mfr_year not in entry["by_year"]:
+                            entry["by_year"][mfr_year] = {
+                                "body_types": set(),
+                                "count": 0,
+                            }
+                        yr_entry = entry["by_year"][mfr_year]
+                        if body_type:
+                            yr_entry["body_types"].add(body_type)
+                        yr_entry["count"] += row_count
                     
                     rows_loaded += 1
             
@@ -222,6 +316,12 @@ class GovDataService:
         Load VEH0220 CSV (vehicles by make, model, fuel type, engine size).
         
         Expected columns: BodyType, Make, GenModel, Model, Fuel, EngineSizeSimple, EngineSizeDesc, <year columns>
+        
+        VEH0220 doesn't have a YearManufacture column, but each row has a
+        specific Model variant (e.g. "FIESTA 1.0T") plus fuel + engine.  We
+        use the yearly snapshot columns to determine which fuel/engine combos
+        are *currently registered* — if a row has a non-zero count in the most
+        recent year column, that fuel/engine combination is still on the road.
         """
         rows_loaded = 0
         try:
@@ -256,27 +356,50 @@ class GovDataService:
                             "engine_sizes": set(),
                             "engine_size_bands": set(),
                             "total_count": 0,
+                            "by_model_variant": {},  # model_variant -> {fuels, engines, ...}
                         }
                     
                     entry = self._veh0220_index[key]
                     
                     if fuel:
                         entry["fuel_types"].add(fuel)
+                    
+                    parsed_engine = None
                     if engine_size and engine_size not in ("[x]", "[z]"):
                         try:
-                            entry["engine_sizes"].add(int(engine_size))
+                            parsed_engine = int(engine_size)
+                            entry["engine_sizes"].add(parsed_engine)
                         except ValueError:
                             pass
                     if engine_desc and engine_desc not in ("[x]", "[z]"):
                         entry["engine_size_bands"].add(engine_desc)
                     
                     # Sum yearly counts
+                    row_count = 0
                     for col_name, value in row.items():
                         if col_name.startswith("20") and value and value not in ("[c]", "[x]", "[z]"):
                             try:
-                                entry["total_count"] += int(value)
+                                row_count += int(value)
                             except ValueError:
                                 pass
+                    entry["total_count"] += row_count
+                    
+                    # Track per-model-variant data (e.g. "FIESTA 1.0T" -> Petrol, 1000cc)
+                    if model not in entry["by_model_variant"]:
+                        entry["by_model_variant"][model] = {
+                            "fuel_types": set(),
+                            "engine_sizes": set(),
+                            "engine_size_bands": set(),
+                            "count": 0,
+                        }
+                    variant = entry["by_model_variant"][model]
+                    if fuel:
+                        variant["fuel_types"].add(fuel)
+                    if parsed_engine:
+                        variant["engine_sizes"].add(parsed_engine)
+                    if engine_desc and engine_desc not in ("[x]", "[z]"):
+                        variant["engine_size_bands"].add(engine_desc)
+                    variant["count"] += row_count
                     
                     rows_loaded += 1
             
@@ -285,9 +408,15 @@ class GovDataService:
         
         return rows_loaded
     
-    def lookup(self, make: str, model: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
+    def lookup(self, make: str, model: str, year: Optional[int] = None,
+               model_variant: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Look up a vehicle in the gov data by make and model.
+        
+        When *model_variant* is supplied (e.g. "1.0T EcoBoost", "ST-3", "320d"),
+        the service tries to match it against the detailed Model variants stored
+        in VEH0220's by_model_variant index.  This allows returning variant-
+        specific fuel type, engine size, and registration count.
         
         Returns gov data fields if found, None otherwise.
         Tries exact match first, then generic model match, then fuzzy.
@@ -296,14 +425,14 @@ class GovDataService:
         model_upper = model.strip().upper()
         
         # Strategy 1: Exact match on (make, model)
-        result = self._try_lookup(make_upper, model_upper, year)
+        result = self._try_lookup(make_upper, model_upper, year, model_variant)
         if result:
             return result
         
         # Strategy 2: Try matching just using the first word of model (generic model)
         model_first_word = model_upper.split()[0] if model_upper else ""
         if model_first_word and model_first_word != model_upper:
-            result = self._try_lookup(make_upper, model_first_word, year)
+            result = self._try_lookup(make_upper, model_first_word, year, model_variant)
             if result:
                 return result
         
@@ -312,35 +441,65 @@ class GovDataService:
             if indexed_key[0] == make_upper:
                 indexed_model = indexed_key[1]
                 if model_upper in indexed_model or indexed_model in model_upper:
-                    result = self._try_lookup(make_upper, indexed_model, year)
+                    result = self._try_lookup(make_upper, indexed_model, year, model_variant)
                     if result:
                         return result
         
         return None
     
-    def _try_lookup(self, make: str, model: str, year: Optional[int] = None) -> Optional[Dict[str, Any]]:
-        """Try to find data for a specific make/model key"""
+    def _try_lookup(self, make: str, model: str, year: Optional[int] = None,
+                    model_variant: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Try to find data for a specific make/model key.
+        
+        When *year* is supplied the result is scoped to that manufacture year:
+        - body_type comes from only that year's registrations
+        - total_registered is the count for that year only
+        - first_registered_year is the requested year (confirmed in data)
+        - fuel_type / engine_size are filtered where possible
+        
+        When *model_variant* is supplied (e.g. "1.0T", "ST-3", "320D") the
+        service fuzzy-matches it against the detailed Model variants in VEH0220
+        and returns variant-specific fuel/engine data plus a list of other
+        available variants so the caller knows what options exist.
+        
+        When no year is given the result is the aggregate across all years.
+        """
         key = (make, model)
         
         result = {}
         
-        # Check VEH0124
+        # ── VEH0124 ──────────────────────────────────────────────
         if key in self._veh0124_index:
             entry = self._veh0124_index[key]
-            result["body_type"] = entry.get("body_type")
             result["generic_model"] = entry.get("generic_model")
-            result["total_registered"] = entry.get("total_count", 0)
             
-            years = entry.get("years_manufactured", set())
-            if years:
-                result["first_registered_year"] = min(years)
-                if year and year not in years:
-                    # The specific year wasn't found but we have data for this model
-                    result["year_match"] = False
-                else:
-                    result["year_match"] = True
+            all_years = entry.get("years_manufactured", set())
+            by_year = entry.get("by_year", {})
+            
+            if year and year in by_year:
+                # Year-specific data
+                yr = by_year[year]
+                body_types = yr.get("body_types", set())
+                result["body_type"] = ", ".join(sorted(body_types)) if body_types else entry.get("body_type")
+                result["total_registered"] = yr.get("count", 0)
+                result["first_registered_year"] = year
+                result["year_match"] = True
+            elif year and all_years:
+                # Year requested but not in data — fall back to aggregate
+                # but signal the mismatch
+                result["body_type"] = entry.get("body_type")
+                result["total_registered"] = entry.get("total_count", 0)
+                result["first_registered_year"] = min(all_years)
+                result["year_match"] = False
+            else:
+                # No year filter — aggregate
+                result["body_type"] = entry.get("body_type")
+                result["total_registered"] = entry.get("total_count", 0)
+                if all_years:
+                    result["first_registered_year"] = min(all_years)
+                result["year_match"] = True
         
-        # Check VEH0220
+        # ── VEH0220 ──────────────────────────────────────────────
         if key in self._veh0220_index:
             entry = self._veh0220_index[key]
             if not result.get("body_type"):
@@ -348,23 +507,115 @@ class GovDataService:
             if not result.get("generic_model"):
                 result["generic_model"] = entry.get("generic_model")
             
-            fuel_types = entry.get("fuel_types", set())
-            if fuel_types:
-                # Return most common/primary fuel type
-                result["fuel_type"] = sorted(fuel_types)[0] if len(fuel_types) == 1 else ", ".join(sorted(fuel_types))
+            by_variant = entry.get("by_model_variant", {})
             
-            engine_sizes = entry.get("engine_sizes", set())
-            if engine_sizes:
-                result["engine_size_cc"] = max(engine_sizes)  # Most common variant
+            # Collect all known variant names for this make/model
+            all_variant_names = sorted(by_variant.keys())
+            if len(all_variant_names) > 1:
+                result["available_variants"] = all_variant_names
             
-            engine_bands = entry.get("engine_size_bands", set())
-            if engine_bands:
-                result["engine_size_band"] = sorted(engine_bands)[-1]
+            # ── Variant matching ─────────────────────────────────
+            matched_variant_key = None
+            if model_variant:
+                variant_upper = model_variant.strip().upper()
+                matched_variant_key = self._match_variant(
+                    variant_upper, model, all_variant_names
+                )
+            
+            if matched_variant_key and matched_variant_key in by_variant:
+                # Use variant-specific fuel/engine data
+                vdata = by_variant[matched_variant_key]
+                result["matched_variant"] = matched_variant_key
+                
+                vfuels = vdata.get("fuel_types", set())
+                if vfuels:
+                    result["fuel_type"] = ", ".join(sorted(vfuels))
+                
+                vengines = vdata.get("engine_sizes", set())
+                if vengines:
+                    result["engine_size_cc"] = max(vengines)
+                
+                vbands = vdata.get("engine_size_bands", set())
+                if vbands:
+                    result["engine_size_band"] = sorted(vbands)[-1]
+                
+                result["variant_registered"] = vdata.get("count", 0)
+            else:
+                # No variant match — use aggregate fuel/engine data
+                fuel_types = entry.get("fuel_types", set())
+                if fuel_types:
+                    result["fuel_type"] = ", ".join(sorted(fuel_types))
+                
+                engine_sizes = entry.get("engine_sizes", set())
+                if engine_sizes:
+                    result["engine_size_cc"] = max(engine_sizes)
+                
+                engine_bands = entry.get("engine_size_bands", set())
+                if engine_bands:
+                    result["engine_size_band"] = sorted(engine_bands)[-1]
             
             if not result.get("total_registered"):
                 result["total_registered"] = entry.get("total_count", 0)
         
         return result if result else None
+    
+    @staticmethod
+    def _match_variant(
+        variant_query: str,
+        base_model: str,
+        variant_names: List[str],
+    ) -> Optional[str]:
+        """
+        Fuzzy-match a user-supplied variant string against known gov data
+        variant names.
+        
+        Matching strategies (in order):
+        1. Exact match: query equals the variant name (or the variant minus the
+           base model prefix).
+        2. Contains: query appears as a substring of a variant name.
+        3. Token overlap: pick the variant with the most overlapping words.
+        
+        Returns the best-matching variant key, or None.
+        """
+        if not variant_names:
+            return None
+        
+        query_tokens = set(variant_query.split())
+        base_upper = base_model.upper()
+        
+        # Strategy 1: Exact match (with or without base model prefix)
+        for vname in variant_names:
+            # "FIESTA 1.0T" with query "1.0T" → strip base model
+            suffix = vname
+            if suffix.startswith(base_upper):
+                suffix = suffix[len(base_upper):].strip()
+            if suffix == variant_query or vname == variant_query:
+                return vname
+        
+        # Strategy 2: Query is a substring of a variant name
+        candidates = []
+        for vname in variant_names:
+            if variant_query in vname:
+                candidates.append(vname)
+        if len(candidates) == 1:
+            return candidates[0]
+        if candidates:
+            # Pick shortest (most specific) match
+            return min(candidates, key=len)
+        
+        # Strategy 3: Token overlap scoring
+        best_match = None
+        best_score = 0
+        for vname in variant_names:
+            vname_tokens = set(vname.split()) - {base_upper}
+            if not vname_tokens:
+                continue
+            overlap = len(query_tokens & vname_tokens)
+            if overlap > best_score:
+                best_score = overlap
+                best_match = vname
+        
+        return best_match if best_score > 0 else None
     
     def search_makes(self, query: str, limit: int = 20) -> List[str]:
         """Search for matching vehicle makes"""

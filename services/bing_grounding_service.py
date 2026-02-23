@@ -183,11 +183,34 @@ class BingGroundingService:
         make: str,
         model: str,
         year: Optional[int] = None,
+        fuel_type: Optional[str] = None,
+        model_variant: Optional[str] = None,
     ) -> str:
-        parts = [f'Find the dimensions and weight specifications for the vehicle: "{make} {model}"']
+        if model_variant:
+            parts = [f'Find the dimensions and weight specifications for the vehicle: "{make} {model} {model_variant}"']
+        else:
+            parts = [f'Find the dimensions and weight specifications for the vehicle: "{make} {model}"']
 
         if year:
             parts.append(f"Model year: {year}")
+
+        if model_variant:
+            parts.append(
+                f"IMPORTANT: The specific variant/engine is '{model_variant}'. "
+                "Different variants of the same model can have significantly different weights "
+                "and dimensions (e.g. a 1.0L 3-cylinder is much lighter than a 2.0L turbo, "
+                "an ST/RS performance variant may be wider/heavier). "
+                "Make sure to find specs for THIS EXACT variant, not just the generic model."
+            )
+
+        if fuel_type:
+            parts.append(f"Fuel type / powertrain: {fuel_type}")
+            parts.append(
+                "IMPORTANT: The fuel type affects the vehicle's weight significantly. "
+                "An electric version is typically heavier than petrol/diesel due to the battery. "
+                "A hybrid will weigh more than a pure petrol/diesel. "
+                "Make sure to find the weight for the SPECIFIC fuel type / powertrain variant above."
+            )
 
         parts.append(
             "\nSearch for the vehicle's length, width, height, wheelbase, kerb weight, and gross weight. "
@@ -201,6 +224,8 @@ class BingGroundingService:
         make: str,
         model: str,
         year: Optional[int] = None,
+        fuel_type: Optional[str] = None,
+        model_variant: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Search for vehicle dimensions using the Bing grounding agent.
@@ -218,7 +243,7 @@ class BingGroundingService:
                 self._ensure_agent()
                 client = self._get_client()
 
-                prompt = self._build_search_prompt(make, model, year)
+                prompt = self._build_search_prompt(make, model, year, fuel_type, model_variant)
 
                 if attempt > 1:
                     logger.info(f"Retry {attempt}/{self.max_retries} for: {make} {model}")
@@ -298,13 +323,15 @@ class BingGroundingService:
         make: str,
         model: str,
         year: Optional[int] = None,
+        fuel_type: Optional[str] = None,
+        model_variant: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Async search with semaphore-based concurrency control."""
         async with self._semaphore:
             loop = asyncio.get_event_loop()
             return await loop.run_in_executor(
                 self._executor,
-                self.search_vehicle, make, model, year
+                self.search_vehicle, make, model, year, fuel_type, model_variant
             )
 
     async def search_vehicles_batch(
@@ -326,6 +353,8 @@ class BingGroundingService:
                 make=vehicle.get("make", ""),
                 model=vehicle.get("model", ""),
                 year=vehicle.get("year"),
+                fuel_type=vehicle.get("fuel_type"),
+                model_variant=vehicle.get("model_variant"),
             )
             results[index] = result
             completed += 1
