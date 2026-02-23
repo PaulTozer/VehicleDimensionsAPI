@@ -298,7 +298,9 @@ resource containerApp 'Microsoft.App/containerApps@2023-05-01' = {
           env: [
             {
               name: 'AZURE_AI_PROJECT_ENDPOINT'
-              value: '${aiServices.properties.endpoint}api/projects/${aiProject.name}'
+              // Use .services.ai.azure.com endpoint (required by azure-ai-projects SDK)
+              // instead of .cognitiveservices.azure.com
+              value: 'https://${aiServices.name}.services.ai.azure.com/api/projects/${aiProject.name}'
             }
             {
               name: 'AZURE_AI_MODEL_DEPLOYMENT_NAME'
@@ -385,6 +387,6 @@ output containerRegistryName string = containerRegistry.name
 output aiServicesEndpoint string = aiServices.properties.endpoint
 output aiServicesName string = aiServices.name
 output aiProjectName string = aiProject.name
-output aiProjectEndpoint string = '${aiServices.properties.endpoint}api/projects/${aiProject.name}'
+output aiProjectEndpoint string = 'https://${aiServices.name}.services.ai.azure.com/api/projects/${aiProject.name}'
 output bingGroundingName string = bingGrounding.name
 output aiHubName string = aiHub.name

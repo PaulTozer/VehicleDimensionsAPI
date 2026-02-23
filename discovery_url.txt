@@ -1,0 +1,1 @@
+https://swedencentral.api.azureml.ms/discovery

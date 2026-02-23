@@ -192,7 +192,8 @@ if (-not $SkipInfrastructure) {
     $aiServicesEndpoint = az cognitiveservices account show --name (az resource list --resource-group $ResourceGroupName --resource-type "Microsoft.CognitiveServices/accounts" --query "[0].name" -o tsv) --resource-group $ResourceGroupName --query "properties.endpoint" -o tsv
     $aiServicesName = az resource list --resource-group $ResourceGroupName --resource-type "Microsoft.CognitiveServices/accounts" --query "[0].name" -o tsv
     $aiProjectName = "${BaseName}-project"
-    $aiProjectEndpoint = "${aiServicesEndpoint}api/projects/${aiProjectName}"
+    # Use .services.ai.azure.com endpoint (required by azure-ai-projects SDK)
+    $aiProjectEndpoint = "https://${aiServicesName}.services.ai.azure.com/api/projects/${aiProjectName}"
     $bingGroundingName = az resource list --resource-group $ResourceGroupName --resource-type "Microsoft.Bing/accounts" --query "[0].name" -o tsv
     $aiHubName = az resource list --resource-group $ResourceGroupName --resource-type "Microsoft.MachineLearningServices/workspaces" --query "[?kind=='Hub'].name | [0]" -o tsv
     $appFqdn = az containerapp show --name "${BaseName}-app" --resource-group $ResourceGroupName --query "properties.configuration.ingress.fqdn" -o tsv 2>$null
