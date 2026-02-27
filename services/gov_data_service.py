@@ -409,7 +409,9 @@ class GovDataService:
         return rows_loaded
     
     def lookup(self, make: str, model: str, year: Optional[int] = None,
-               model_variant: Optional[str] = None) -> Optional[Dict[str, Any]]:
+               model_variant: Optional[str] = None,
+               fuel_type: Optional[str] = None,
+               engine_capacity_cc: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """
         Look up a vehicle in the gov data by make and model.
         
@@ -418,6 +420,15 @@ class GovDataService:
         in VEH0220's by_model_variant index.  This allows returning variant-
         specific fuel type, engine size, and registration count.
         
+        When *fuel_type* is supplied (e.g. "Diesel", "Petrol"), the VEH0220
+        results are filtered to only include data for that fuel type —
+        fuel_type, engine_size, available_variants are all scoped to matching
+        rows so the response is specific to the known vehicle.
+        
+        When *engine_capacity_cc* is supplied (e.g. 1560), the VEH0220 results
+        are further filtered to only include variants whose engine_sizes match
+        the rounded-up EngineSizeSimple value (e.g. 1560 → 1600).
+        
         Returns gov data fields if found, None otherwise.
         Tries exact match first, then generic model match, then fuzzy.
         """
@@ -425,14 +436,14 @@ class GovDataService:
         model_upper = model.strip().upper()
         
         # Strategy 1: Exact match on (make, model)
-        result = self._try_lookup(make_upper, model_upper, year, model_variant)
+        result = self._try_lookup(make_upper, model_upper, year, model_variant, fuel_type, engine_capacity_cc)
         if result:
             return result
         
         # Strategy 2: Try matching just using the first word of model (generic model)
         model_first_word = model_upper.split()[0] if model_upper else ""
         if model_first_word and model_first_word != model_upper:
-            result = self._try_lookup(make_upper, model_first_word, year, model_variant)
+            result = self._try_lookup(make_upper, model_first_word, year, model_variant, fuel_type, engine_capacity_cc)
             if result:
                 return result
         
@@ -441,14 +452,16 @@ class GovDataService:
             if indexed_key[0] == make_upper:
                 indexed_model = indexed_key[1]
                 if model_upper in indexed_model or indexed_model in model_upper:
-                    result = self._try_lookup(make_upper, indexed_model, year, model_variant)
+                    result = self._try_lookup(make_upper, indexed_model, year, model_variant, fuel_type, engine_capacity_cc)
                     if result:
                         return result
         
         return None
     
     def _try_lookup(self, make: str, model: str, year: Optional[int] = None,
-                    model_variant: Optional[str] = None) -> Optional[Dict[str, Any]]:
+                    model_variant: Optional[str] = None,
+                    fuel_type: Optional[str] = None,
+                    engine_capacity_cc: Optional[int] = None) -> Optional[Dict[str, Any]]:
         """Try to find data for a specific make/model key.
         
         When *year* is supplied the result is scoped to that manufacture year:
@@ -461,6 +474,14 @@ class GovDataService:
         service fuzzy-matches it against the detailed Model variants in VEH0220
         and returns variant-specific fuel/engine data plus a list of other
         available variants so the caller knows what options exist.
+        
+        When *fuel_type* is supplied (e.g. "DIESEL") the VEH0220 results are
+        filtered so that only variants with that fuel type are included in
+        fuel_type, engine_size, and available_variants.
+        
+        When *engine_capacity_cc* is supplied (e.g. 1560) the VEH0220 results
+        are further filtered to only include variants whose engine_sizes set
+        contains the matching EngineSizeSimple value (rounded up to nearest 100).
         
         When no year is given the result is the aggregate across all years.
         """
@@ -509,8 +530,41 @@ class GovDataService:
             
             by_variant = entry.get("by_model_variant", {})
             
-            # Collect all known variant names for this make/model
-            all_variant_names = sorted(by_variant.keys())
+            # ── Fuel-type filtering ────────────────────────────
+            # When a fuel_type is known (e.g. from DVLA/MOT), narrow the
+            # VEH0220 data to only include variants that match that fuel.
+            fuel_filter_upper = fuel_type.strip().upper() if fuel_type else None
+
+            # ── Engine-size filtering ─────────────────────────
+            # VEH0220 EngineSizeSimple rounds up to the nearest 100cc.
+            # e.g. 1560cc → 1600, 999cc → 1000, 1000cc → 1000.
+            engine_simple = None
+            if engine_capacity_cc is not None and engine_capacity_cc > 0:
+                import math
+                engine_simple = int(math.ceil(engine_capacity_cc / 100.0) * 100)
+
+            # Collect all known variant names for this make/model,
+            # optionally filtered by fuel type and engine size.
+            def _variant_matches(vname: str, vdata: dict) -> bool:
+                if fuel_filter_upper:
+                    vf = {f.upper() for f in vdata.get("fuel_types", set())}
+                    if fuel_filter_upper not in vf:
+                        return False
+                if engine_simple is not None:
+                    ve = vdata.get("engine_sizes", set())
+                    if ve and engine_simple not in ve:
+                        return False
+                return True
+
+            if (fuel_filter_upper or engine_simple is not None) and by_variant:
+                filtered_variant_names = sorted(
+                    vname for vname, vdata in by_variant.items()
+                    if _variant_matches(vname, vdata)
+                )
+            else:
+                filtered_variant_names = sorted(by_variant.keys())
+
+            all_variant_names = filtered_variant_names
             if len(all_variant_names) > 1:
                 result["available_variants"] = all_variant_names
             
@@ -528,37 +582,119 @@ class GovDataService:
                 result["matched_variant"] = matched_variant_key
                 
                 vfuels = vdata.get("fuel_types", set())
+                if fuel_filter_upper:
+                    vfuels = {f for f in vfuels if f.upper() == fuel_filter_upper}
                 if vfuels:
                     result["fuel_type"] = ", ".join(sorted(vfuels))
                 
                 vengines = vdata.get("engine_sizes", set())
-                if vengines:
+                if engine_simple is not None and engine_simple in vengines:
+                    result["engine_size_cc"] = engine_simple
+                elif vengines:
                     result["engine_size_cc"] = max(vengines)
                 
                 vbands = vdata.get("engine_size_bands", set())
-                if vbands:
-                    result["engine_size_band"] = sorted(vbands)[-1]
+                if engine_simple is not None and vbands:
+                    result["engine_size_band"] = self._match_engine_band(engine_simple, vbands)
+                elif vbands:
+                    result["engine_size_band"] = self._match_engine_band(None, vbands)
                 
                 result["variant_registered"] = vdata.get("count", 0)
             else:
                 # No variant match — use aggregate fuel/engine data
-                fuel_types = entry.get("fuel_types", set())
-                if fuel_types:
-                    result["fuel_type"] = ", ".join(sorted(fuel_types))
-                
-                engine_sizes = entry.get("engine_sizes", set())
-                if engine_sizes:
-                    result["engine_size_cc"] = max(engine_sizes)
-                
-                engine_bands = entry.get("engine_size_bands", set())
-                if engine_bands:
-                    result["engine_size_band"] = sorted(engine_bands)[-1]
+                if fuel_filter_upper or engine_simple is not None:
+                    # Aggregate only from variants matching the filters
+                    agg_fuels: set = set()
+                    agg_engines: set = set()
+                    agg_bands: set = set()
+                    agg_count = 0
+                    for vname in all_variant_names:
+                        vdata = by_variant.get(vname, {})
+                        vf = vdata.get("fuel_types", set())
+                        ve = vdata.get("engine_sizes", set())
+                        
+                        if fuel_filter_upper and fuel_filter_upper not in {f.upper() for f in vf}:
+                            continue
+                        if engine_simple is not None and ve and engine_simple not in ve:
+                            continue
+                        
+                        if fuel_filter_upper:
+                            agg_fuels |= {f for f in vf if f.upper() == fuel_filter_upper}
+                        else:
+                            agg_fuels |= vf
+                        if engine_simple is not None:
+                            agg_engines.add(engine_simple)
+                        else:
+                            agg_engines |= ve
+                        agg_bands |= vdata.get("engine_size_bands", set())
+                        agg_count += vdata.get("count", 0)
+                    if agg_fuels:
+                        result["fuel_type"] = ", ".join(sorted(agg_fuels))
+                    if engine_simple is not None:
+                        result["engine_size_cc"] = engine_simple
+                    elif agg_engines:
+                        result["engine_size_cc"] = max(agg_engines)
+                    if agg_bands:
+                        result["engine_size_band"] = self._match_engine_band(engine_simple, agg_bands)
+                    if agg_count:
+                        result["total_registered"] = agg_count
+                else:
+                    # No fuel filter — use full aggregate
+                    fuel_types = entry.get("fuel_types", set())
+                    if fuel_types:
+                        result["fuel_type"] = ", ".join(sorted(fuel_types))
+                    
+                    engine_sizes = entry.get("engine_sizes", set())
+                    if engine_sizes:
+                        result["engine_size_cc"] = max(engine_sizes)
+                    
+                    engine_bands = entry.get("engine_size_bands", set())
+                    if engine_bands:
+                        result["engine_size_band"] = self._match_engine_band(None, engine_bands)
             
             if not result.get("total_registered"):
                 result["total_registered"] = entry.get("total_count", 0)
         
         return result if result else None
     
+    @staticmethod
+    def _match_engine_band(
+        engine_simple: Optional[int],
+        bands: set,
+    ) -> Optional[str]:
+        """
+        Pick the engine size band that matches the given EngineSizeSimple value.
+
+        VEH0220 bands look like "1501cc to 1600cc", "Up to 100cc", "Over 15000cc".
+        When *engine_simple* is provided (e.g. 1600), find the band whose upper
+        bound matches.  Otherwise return the most common (largest count) or
+        the numerically highest band.
+        """
+        if not bands:
+            return None
+
+        if engine_simple is not None:
+            # Try to find the band whose range includes engine_simple
+            target = str(engine_simple)
+            for band in bands:
+                # "1501cc to 1600cc" — check if target appears as the upper bound
+                if f"to {target}cc" in band:
+                    return band
+                # "Up to 100cc" — for engine_simple == 100
+                if band.startswith("Up to") and target + "cc" in band:
+                    return band
+                # "Over 15000cc" — for engine_simple >= 15000
+                if band.startswith("Over") and engine_simple >= 15000:
+                    return band
+
+        # Fallback: sort bands by parsing their upper numeric bound
+        def _upper_bound(band: str) -> int:
+            import re as _re
+            nums = _re.findall(r'\d+', band)
+            return max(int(n) for n in nums) if nums else 0
+
+        return max(bands, key=_upper_bound)
+
     @staticmethod
     def _match_variant(
         variant_query: str,

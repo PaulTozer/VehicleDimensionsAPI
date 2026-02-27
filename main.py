@@ -358,6 +358,7 @@ async def lookup_by_registration(request: RegLookupRequest):
                 model=model_for_lookup,
                 year=identity.year,
                 fuel_type=identity.fuel_type,
+                engine_capacity_cc=identity.engine_capacity_cc,
             )
             dimensions_result = await lookup_service.lookup_vehicle(search_request)
         else:

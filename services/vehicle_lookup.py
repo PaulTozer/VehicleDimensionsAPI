@@ -69,6 +69,8 @@ class VehicleLookupService:
                 gov_result = self.gov_service.lookup(
                     request.make, request.model, request.year,
                     model_variant=request.model_variant,
+                    fuel_type=request.fuel_type,
+                    engine_capacity_cc=request.engine_capacity_cc,
                 )
                 if gov_result:
                     response.gov_data = GovDataFields(

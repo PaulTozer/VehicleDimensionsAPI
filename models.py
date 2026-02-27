@@ -19,6 +19,7 @@ class VehicleSearchRequest(BaseModel):
     model: str = Field(..., description="Vehicle model (e.g. Focus, 3 Series, Corolla)", min_length=1)
     year: Optional[int] = Field(None, description="Year of manufacture (e.g. 2020)", ge=1900, le=2030)
     fuel_type: Optional[str] = Field(None, description="Fuel type (e.g. Petrol, Diesel, Electric, Hybrid). If omitted, will be inferred from gov data when available.")
+    engine_capacity_cc: Optional[int] = Field(None, description="Engine capacity in cubic centimetres (e.g. 1560). Used to filter gov data to matching engine size band.", ge=0, le=20000)
     model_variant: Optional[str] = Field(None, description="Specific model variant or engine (e.g. '1.0T EcoBoost', 'ST-3', '320d', '1117 HC'). Helps distinguish different engines and trim levels that affect weight and dimensions.")
     
     class Config:
@@ -28,6 +29,7 @@ class VehicleSearchRequest(BaseModel):
                 "model": "Focus",
                 "year": 2020,
                 "fuel_type": "Petrol",
+                "engine_capacity_cc": 1560,
                 "model_variant": "1.0T EcoBoost"
             }
         }
@@ -211,6 +213,7 @@ class RegVehicleIdentity(BaseModel):
     mot_status: Optional[str] = None
     mot_expiry_date: Optional[str] = None
     co2_emissions: Optional[int] = None
+    revenue_weight_kg: Optional[int] = Field(None, description="Gross vehicle weight (GVW) from DVLA — useful for cross-referencing Bing Grounding gross_weight_kg")
     wheelplan: Optional[str] = None
     month_first_registered: Optional[str] = None
 
@@ -238,6 +241,7 @@ class RegLookupResponse(BaseModel):
                     "colour": "Blue",
                     "tax_status": "Taxed",
                     "mot_status": "Valid",
+                    "revenue_weight_kg": 1845,
                 },
                 "dimensions": None,
                 "status": "success",
@@ -256,3 +260,5 @@ class HealthResponse(BaseModel):
     gov_data: Optional[str] = None
     retry_queue: Optional[str] = None
     dvla_mot: Optional[str] = None
+
+

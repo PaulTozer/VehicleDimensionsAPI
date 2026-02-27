@@ -103,8 +103,8 @@ class DvlaMotService:
         Returns a dict with keys:
             registration_number, make, model, year, fuel_type,
             engine_capacity_cc, colour, tax_status, tax_due_date,
-            mot_status, mot_expiry_date, co2_emissions, wheelplan,
-            month_first_registered, errors
+            mot_status, mot_expiry_date, co2_emissions, revenue_weight_kg,
+            wheelplan, month_first_registered, errors
         """
         reg = registration_number.upper().replace(" ", "")
         result = {
@@ -120,6 +120,7 @@ class DvlaMotService:
             "mot_status": None,
             "mot_expiry_date": None,
             "co2_emissions": None,
+            "revenue_weight_kg": None,
             "wheelplan": None,
             "month_first_registered": None,
             "errors": [],
@@ -149,6 +150,7 @@ class DvlaMotService:
                         result["mot_status"] = d.get("motStatus")
                         result["mot_expiry_date"] = d.get("motExpiryDate")
                         result["co2_emissions"] = d.get("co2Emissions")
+                        result["revenue_weight_kg"] = d.get("revenueWeight")
                         result["wheelplan"] = d.get("wheelplan")
                         result["month_first_registered"] = d.get("monthOfFirstRegistration")
                         logger.info(f"DVLA VES: {reg} → {result['make']} {result['year']}")
@@ -186,6 +188,7 @@ class DvlaMotService:
                         )
                         if mot_resp.status_code == 200:
                             vehicle = mot_resp.json()
+                            logger.debug(f"MOT raw response for {reg}: {vehicle}")
                             mot_model = vehicle.get("model")
                             if mot_model:
                                 result["model"] = self._title(mot_model)
@@ -195,13 +198,24 @@ class DvlaMotService:
                             # Fill fuel from MOT if DVLA didn't provide it
                             if not result["fuel_type"] and vehicle.get("fuelType"):
                                 result["fuel_type"] = self._title(vehicle["fuelType"])
-                            # Manufacture date can give a more precise year
-                            mfg_date = vehicle.get("manufactureDate")
-                            if mfg_date and not result["year"]:
-                                try:
-                                    result["year"] = int(mfg_date[:4])
-                                except (ValueError, TypeError):
-                                    pass
+                            # Fill colour from MOT if DVLA didn't provide it
+                            if not result["colour"] and vehicle.get("primaryColour"):
+                                result["colour"] = self._title(vehicle["primaryColour"])
+                            # Manufacture year (direct field or from date)
+                            if not result["year"]:
+                                mfg_year = vehicle.get("manufactureYear")
+                                if mfg_year:
+                                    try:
+                                        result["year"] = int(mfg_year)
+                                    except (ValueError, TypeError):
+                                        pass
+                                if not result["year"]:
+                                    mfg_date = vehicle.get("manufactureDate")
+                                    if mfg_date:
+                                        try:
+                                            result["year"] = int(mfg_date[:4])
+                                        except (ValueError, TypeError):
+                                            pass
                             # Engine size from MOT if DVLA didn't provide it
                             if not result["engine_capacity_cc"] and vehicle.get("engineSize"):
                                 try:
