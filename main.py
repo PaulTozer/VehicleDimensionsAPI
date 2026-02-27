@@ -34,8 +34,11 @@ from models import (
     RetryQueueStatsResponse,
     RetryAllResponse,
     GovDataStatsResponse,
+    RegLookupRequest,
+    RegLookupResponse,
+    RegVehicleIdentity,
 )
-from services import VehicleLookupService, GovDataService
+from services import VehicleLookupService, GovDataService, DvlaMotService
 from services.cache_service import CacheService
 from services.bing_grounding_service import BingGroundingService
 from services.retry_queue_service import RetryQueueService
@@ -53,12 +56,13 @@ gov_service: GovDataService = None
 cache_service: CacheService = None
 bing_service: BingGroundingService = None
 retry_queue: RetryQueueService = None
+dvla_mot_service: DvlaMotService = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup and shutdown events"""
-    global lookup_service, gov_service, cache_service, bing_service, retry_queue
+    global lookup_service, gov_service, cache_service, bing_service, retry_queue, dvla_mot_service
 
     logger.info("Starting Vehicle Dimensions API...")
 
@@ -122,6 +126,18 @@ async def lifespan(app: FastAPI):
         f"auto-enqueue: {RETRY_AUTO_ENQUEUE})"
     )
 
+    # Initialize DVLA / MOT service
+    dvla_mot_service = DvlaMotService()
+    if dvla_mot_service.is_configured:
+        parts = []
+        if dvla_mot_service.dvla_configured:
+            parts.append("DVLA VES")
+        if dvla_mot_service.mot_configured:
+            parts.append("MOT History")
+        logger.info(f"Reg lookup enabled ({' + '.join(parts)})")
+    else:
+        logger.info("Reg lookup disabled (no DVLA_API_KEY or MOT_API_KEY set)")
+
     yield
 
     # Cleanup
@@ -147,6 +163,7 @@ app = FastAPI(
     ## Endpoints
     - **Single lookup**: POST /api/v1/vehicle/lookup
     - **Batch lookup**: POST /api/v1/vehicle/batch
+    - **Reg number lookup**: POST /api/v1/vehicle/lookup-by-reg
     - **Gov data browsing**: GET /api/v1/gov/makes, /api/v1/gov/models/{make}
     """,
     version="1.0.0",
@@ -177,6 +194,14 @@ async def health_check():
     retry_storage = None
     if retry_queue:
         retry_storage = "Redis" if retry_queue.uses_redis else "in-memory"
+    dvla_mot_status = None
+    if dvla_mot_service and dvla_mot_service.is_configured:
+        parts = []
+        if dvla_mot_service.dvla_configured:
+            parts.append("DVLA")
+        if dvla_mot_service.mot_configured:
+            parts.append("MOT")
+        dvla_mot_status = " + ".join(parts)
     return HealthResponse(
         status="healthy",
         version="1.0.0",
@@ -185,6 +210,7 @@ async def health_check():
         search_provider=search_provider,
         gov_data=gov_status,
         retry_queue=retry_storage,
+        dvla_mot=dvla_mot_status,
     )
 
 
@@ -270,6 +296,86 @@ async def batch_lookup(
         failed=failed,
         processing_time_seconds=round(elapsed, 2),
         results=results,
+    )
+
+
+# ──────────────────────────────────────────────
+# Registration Number Lookup
+# ──────────────────────────────────────────────
+
+@app.post(
+    "/api/v1/vehicle/lookup-by-reg",
+    response_model=RegLookupResponse,
+    tags=["Vehicle Lookup"],
+)
+async def lookup_by_registration(request: RegLookupRequest):
+    """
+    Look up a vehicle by UK registration number.
+
+    1. Calls DVLA VES API to get make, fuel type, year, engine size,
+       colour, tax/MOT status.
+    2. Calls MOT History API to get the **model** name (not in DVLA data).
+    3. Optionally chains into the full dimensions/weight lookup if
+       `include_dimensions` is true and both make & model are resolved.
+
+    Requires `DVLA_API_KEY` and/or `MOT_API_KEY` environment variables.
+    """
+    if not dvla_mot_service or not dvla_mot_service.is_configured:
+        raise HTTPException(
+            status_code=503,
+            detail="Registration lookup not configured (set DVLA_API_KEY / MOT_API_KEY)",
+        )
+
+    # Step 1: Identify the vehicle
+    reg_result = await dvla_mot_service.lookup_registration(
+        request.registration_number
+    )
+    identity = RegVehicleIdentity(**{
+        k: v for k, v in reg_result.items() if k != "errors"
+    })
+    errors = list(reg_result.get("errors", []))
+
+    # Determine basic status
+    if not identity.make:
+        return RegLookupResponse(
+            vehicle=identity,
+            status=StatusEnum.NOT_FOUND,
+            errors=errors or [f"Could not identify vehicle for {request.registration_number}"],
+        )
+
+    # Step 2: Chain into dimensions lookup if requested
+    dimensions_result = None
+    if request.include_dimensions and identity.make:
+        model_for_lookup = identity.model or "Unknown"
+        if model_for_lookup == "Unknown":
+            errors.append(
+                "Model not available from DVLA/MOT — dimensions lookup may be inaccurate"
+            )
+
+        if lookup_service:
+            search_request = VehicleSearchRequest(
+                make=identity.make,
+                model=model_for_lookup,
+                year=identity.year,
+                fuel_type=identity.fuel_type,
+            )
+            dimensions_result = await lookup_service.lookup_vehicle(search_request)
+        else:
+            errors.append("Vehicle lookup service not available")
+
+    # Final status
+    if identity.make and identity.model:
+        status = StatusEnum.SUCCESS
+    elif identity.make:
+        status = StatusEnum.PARTIAL
+    else:
+        status = StatusEnum.NOT_FOUND
+
+    return RegLookupResponse(
+        vehicle=identity,
+        dimensions=dimensions_result,
+        status=status,
+        errors=errors,
     )
 
 

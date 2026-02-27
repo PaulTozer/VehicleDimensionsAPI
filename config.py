@@ -48,5 +48,13 @@ RETRY_BACKOFF_BASE = float(os.getenv("RETRY_BACKOFF_BASE", "30.0"))
 RETRY_MAX_CONCURRENT = int(os.getenv("RETRY_MAX_CONCURRENT", "5"))
 RETRY_AUTO_ENQUEUE = os.getenv("RETRY_AUTO_ENQUEUE", "true").lower() == "true"
 
+# DVLA VES & MOT History APIs
+DVLA_API_KEY = os.getenv("DVLA_API_KEY")
+MOT_API_KEY = os.getenv("MOT_API_KEY")
+MOT_CLIENT_ID = os.getenv("MOT_CLIENT_ID")
+MOT_CLIENT_SECRET = os.getenv("MOT_CLIENT_SECRET")
+MOT_TOKEN_URL = os.getenv("MOT_TOKEN_URL")  # e.g. https://login.microsoftonline.com/{tenantId}/oauth2/v2.0/token
+MOT_SCOPE = os.getenv("MOT_SCOPE", "https://tapi.dvsa.gov.uk/.default")
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

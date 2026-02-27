@@ -5,6 +5,7 @@ from .gov_data_service import GovDataService
 from .cache_service import CacheService
 from .bing_grounding_service import BingGroundingService
 from .retry_queue_service import RetryQueueService
+from .dvla_mot_service import DvlaMotService
 
 __all__ = [
     "VehicleLookupService",
@@ -12,4 +13,5 @@ __all__ = [
     "CacheService",
     "BingGroundingService",
     "RetryQueueService",
+    "DvlaMotService",
 ]

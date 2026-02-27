@@ -175,6 +175,77 @@ class GovDataStatsResponse(BaseModel):
     last_refreshed: Optional[str] = None
 
 
+class RegLookupRequest(BaseModel):
+    """Request model for registration number lookup"""
+    registration_number: str = Field(
+        ...,
+        description="UK vehicle registration number (e.g. 'AB12 CDE')",
+        min_length=2,
+        max_length=10,
+    )
+    include_dimensions: bool = Field(
+        True,
+        description="If true, chain into the vehicle dimensions lookup after identifying make/model",
+    )
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "registration_number": "AB12 CDE",
+                "include_dimensions": True,
+            }
+        }
+
+
+class RegVehicleIdentity(BaseModel):
+    """Vehicle identity fields returned by DVLA VES + MOT History APIs"""
+    registration_number: str
+    make: Optional[str] = None
+    model: Optional[str] = None
+    year: Optional[int] = None
+    fuel_type: Optional[str] = None
+    engine_capacity_cc: Optional[int] = None
+    colour: Optional[str] = None
+    tax_status: Optional[str] = None
+    tax_due_date: Optional[str] = None
+    mot_status: Optional[str] = None
+    mot_expiry_date: Optional[str] = None
+    co2_emissions: Optional[int] = None
+    wheelplan: Optional[str] = None
+    month_first_registered: Optional[str] = None
+
+
+class RegLookupResponse(BaseModel):
+    """Response model for registration number lookup"""
+    vehicle: RegVehicleIdentity
+    dimensions: Optional[VehicleInfoResponse] = Field(
+        None,
+        description="Full dimensions/weight result (only if include_dimensions=True and make+model resolved)",
+    )
+    status: StatusEnum = StatusEnum.NOT_FOUND
+    errors: List[str] = Field(default_factory=list)
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "vehicle": {
+                    "registration_number": "AB12CDE",
+                    "make": "Ford",
+                    "model": "Focus",
+                    "year": 2012,
+                    "fuel_type": "Petrol",
+                    "engine_capacity_cc": 999,
+                    "colour": "Blue",
+                    "tax_status": "Taxed",
+                    "mot_status": "Valid",
+                },
+                "dimensions": None,
+                "status": "success",
+                "errors": [],
+            }
+        }
+
+
 class HealthResponse(BaseModel):
     """Health check response"""
     status: str
@@ -184,3 +255,4 @@ class HealthResponse(BaseModel):
     search_provider: str = "Unknown"
     gov_data: Optional[str] = None
     retry_queue: Optional[str] = None
+    dvla_mot: Optional[str] = None
